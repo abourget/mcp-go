@@ -2,6 +2,12 @@
 // MCP is a protocol for communication between LLM-powered applications and their supporting services.
 package mcp
 
+import (
+	"encoding/json"
+
+	"github.com/tidwall/gjson"
+)
+
 /* JSON-RPC types */
 
 // JSONRPCMessage represents either a JSONRPCRequest, JSONRPCNotification, JSONRPCResponse, or JSONRPCError
@@ -416,6 +422,19 @@ type BlobResourceContents struct {
 	Blob string `json:"blob"`
 }
 
+type TextBlobResourceContents struct {
+	ResourceContents
+
+	// Text and Blob are mutully exclusive.
+
+	// The text of the item. This must only be set if the item can actually be
+	// represented as text (not binary data).
+	Text string `json:"text"`
+
+	// A base64-encoded string representing the binary data of the item.
+	Blob string `json:"blob"`
+}
+
 /* Prompts */
 
 // ListPromptsRequest is sent from the client to request a list of prompts and
@@ -541,11 +560,71 @@ type ListToolsResult struct {
 // should be reported as an MCP error response.
 type CallToolResult struct {
 	Result
-	Content []interface{} `json:"content"` // Can be TextContent, ImageContent, or      EmbeddedResource
+	Content []any `json:"content"` // Can be TextContent, ImageContent, or EmbeddedResource
 	// Whether the tool call ended in an error.
 	//
 	// If not set, this is assumed to be false (the call was successful).
 	IsError bool `json:"isError,omitempty"`
+}
+
+func (c *CallToolResult) UnmarshalJSON(data []byte) error {
+	res := struct {
+		Result
+		ToolResult json.RawMessage `json:"toolResult"` // For backwards compatibility with Spec version 2024-10-07.
+		Content    json.RawMessage `json:"content"`
+		IsError    bool            `json:"isError"`
+	}{}
+	if err := json.Unmarshal(data, &res); err != nil {
+		return err
+	}
+	c.IsError = res.IsError
+	c.Result = res.Result
+
+	if d := gjson.ParseBytes(res.ToolResult); d.Exists() {
+		c.Content = append(c.Content, TextContent{Type: "text", Text: d.String()})
+	}
+	d := gjson.ParseBytes(res.Content)
+	d.ForEach(func(_, d gjson.Result) bool {
+		switch d.Get("type").String() {
+		case "text":
+			c.Content = append(c.Content, TextContent{
+				Type: "text",
+				Text: d.Get("text").String(),
+			})
+		case "image":
+			c.Content = append(c.Content, ImageContent{
+				Type:     "image",
+				Data:     d.Get("data").String(),
+				MIMEType: d.Get("mimeType").String(),
+			})
+		case "resource":
+			r := d.Get("resource")
+			c.Content = append(c.Content, EmbeddedResource{
+				Type: "resource",
+				Resource: ResourceContents{
+					URI:      r.Get("uri").String(),
+					MIMEType: r.Get("mimeType").String(),
+				},
+			})
+		}
+		return true
+	})
+	return nil
+}
+
+type TextImageEmbeddedResourceContent struct {
+	Annotated
+	Type string `json:"type"`
+
+	// Only for Type=text
+	Text string `json:"text,omitempty"` // The text content of the message.
+
+	// Only for Type=image
+	Data     string `json:"data,omitempty"`     // The base64-encoded image data.
+	MIMEType string `json:"mimeType,omitempty"` // The MIME type of the image data.  Different providers may support different image types.
+
+	// Only for Type=resource
+	Resource *TextBlobResourceContents `json:"resource,omitempty"`
 }
 
 // CallToolRequest is used by the client to invoke a tool provided by the server.

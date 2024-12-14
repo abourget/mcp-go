@@ -416,6 +416,8 @@ func (c *StdioMCPClient) CallTool(
 		return nil, err
 	}
 
+	fmt.Println("MAAAAAAAAAAAMAA", string(*response))
+
 	var result mcp.CallToolResult
 	if err := json.Unmarshal(*response, &result); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
